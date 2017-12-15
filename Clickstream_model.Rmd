@@ -1,0 +1,275 @@
+---
+title: "Clickstream Data Model Fitting"
+author: "M MANIVASSAKAM"
+date: "October 19, 2017"
+output: html_document
+---
+
+```{r}
+datapath = "C:/myUchicago/analytics/fall2017/realtime/Project3 Marketing Personalization/Personalization_ProjectMaterials_MScA32005"
+```
+
+
+```{r}
+suppressWarnings(library(rpart))                      # Popular decision tree algorithm
+suppressWarnings(library(rpart.plot))                 # Enhanced tree plots
+suppressWarnings(library(randomForest))
+suppressWarnings(library(fBasics))
+Data = read.csv(paste(datapath,'DTTrain.csv',sep='/'),header=TRUE)
+
+```
+
+```{r}
+# dataset dimensions
+dim(Data)
+```
+
+```{r}
+# Training content
+Data[1:3,1:5]
+```
+
+```{r}
+Data[1:3,(ncol(Data)-4):ncol(Data)]
+
+```
+
+```{r}
+classColName = tail(colnames(Data),1)
+Data[1:5,classColName]
+```
+
+```{r}
+set.seed(8) 
+xTrain = Data[sample(nrow(Data)),-1] # remove time stamp
+```
+
+#Creating and Plotting Small Classification Tree
+```{r}
+formula = formula(paste(classColName,'.',sep='~'))
+formula
+```
+
+```{r}
+set.seed(8)
+smallTree <- rpart(formula(paste(classColName,'.',sep='~')), data=xTrain,control = rpart.control(minbucket=250,cp=.0001))
+```
+
+```{r}
+printcp(smallTree)
+
+```
+
+```{r}
+plotcp(smallTree)
+
+```
+```{r}
+best.CP = smallTree$cptable[which.min(smallTree$cptable[,"xerror"]),"CP"]
+best.CP
+```
+```{r}
+prp(smallTree,extra=4, # display prob of classes in the node
+    branch=.5, # change angle of branch lines
+    shadow.col="gray", # shadows under the leaves
+    branch.lty=3, # draw branches using dotted lines
+    split.cex=1.2, # make the split text larger than the node text
+    split.prefix="is ", # put "is " before split text
+    split.suffix="?", # put "?" after split text
+    split.box.col="lightgray", # lightgray split boxes (default is white)
+    split.border.col="darkgray", # darkgray border on split boxes
+    split.round=.5)
+
+```
+
+```{r}
+prunedTree <- prune(smallTree, cp = best.CP)
+printcp(prunedTree)
+```
+
+```{r}
+prp(prunedTree,extra=4, # display prob of classes in the node
+    branch=.5, # change angle of branch lines
+    shadow.col="gray", # shadows under the leaves
+    branch.lty=3, # draw branches using dotted lines
+    split.cex=1.2, # make the split text larger than the node text
+    split.prefix="is ", # put "is " before split text
+    split.suffix="?", # put "?" after split text
+    split.box.col="lightgray", # lightgray split boxes (default is white)
+    split.border.col="darkgray", # darkgray border on split boxes
+    split.round=.5)
+```
+
+```{r}
+test = xTrain[1,-ncol(xTrain)]
+distr = predict(smallTree,test)
+distr
+```
+
+```{r}
+class = which.max(distr)
+c(class,xTrain[1,ncol(xTrain)])
+```
+
+```{r}
+save(prunedTree, file = paste(datapath,'prunedTree.rda',sep='/'))
+
+```
+
+```{r}
+load(file = paste(datapath,'prunedTree.rda',sep='/'),envir = e <- new.env())
+identical(prunedTree, e$prunedTree, ignore.environment = TRUE)
+```
+#Testing the Model in Real Time
+```{r}
+load(file = 'prunedTree.rda')
+
+```
+#k-Nearest Neighbor Classification
+```{r}
+nFold = 10
+trainSize = round(nrow(xTrain)*(1-1/nFold),0)
+kNNTrain = xTrain[1:trainSize,]
+kNNTest = xTrain[(trainSize+1):nrow(xTrain),-ncol(xTrain)]
+target = xTrain[(trainSize+1):nrow(xTrain),ncol(xTrain)]
+```
+
+```{r}
+suppressWarnings(library(kknn))
+suppressWarnings(library(dummies))
+nNeigbours = 10
+classify.knn <- kknn(formula = formula,
+                     train = kNNTrain, test = kNNTest, k = nNeigbours,
+                     distance = 2, scale = F)
+classify.knn$prob[1:5,]
+```
+
+```{r}
+MultiLogLoss <- function(act, pred)
+{
+  eps = 1e-15;
+  nr <- nrow(pred)
+  pred = matrix(sapply( pred, function(x) max(eps,x)), nrow = nr)      
+  pred = matrix(sapply( pred, function(x) min(1-eps,x)), nrow = nr)
+  #normalize rows
+  ll = sum(act*log(sweep(pred, 1, rowSums(pred), FUN="/")))
+  ll = -ll/nrow(act)
+  return(ll);
+}
+```
+
+```{r}
+test_target_IndMat<-dummy.data.frame(data=as.data.frame(target), 
+                                     sep="_", verbose=F, 
+                                     dummy.class="ALL")
+```
+
+```{r}
+target[1:4]
+
+```
+
+```{r}
+test_target_IndMat[1:4,]
+
+```
+
+```{r}
+EPS = 0.001
+classify.knn$prob[classify.knn$prob<EPS] = EPS
+MultiLogLoss(test_target_IndMat,classify.knn$prob)
+```
+```{r}
+suppressWarnings(library(caret))
+knnCaret = knn3(formula,data = kNNTrain, k = nNeigbours)
+```
+```{r}
+knnCaretProb = predict(knnCaret, kNNTest, type="prob")
+knnCaretProb[1:5,]
+```
+```{r}
+knnCaretProb[knnCaretProb<EPS] = EPS
+
+```
+
+#Random Forest
+```{r}
+set.seed(118) 
+NTrees = 80
+rfFit <- randomForest(formula, data=kNNTrain, importance=TRUE, ntree=NTrees)
+rfProb <- predict(rfFit, kNNTest, type="prob")
+MultiLogLoss(test_target_IndMat,rfProb)
+```
+```{r}
+Q = 0.5
+MultiLogLoss(test_target_IndMat,Q*rfProb+(1-Q)*classify.knn$prob)
+```
+#Feature Engineering
+```{r}
+#Feature Transformation
+
+deg = 0.8
+kNNTrain[,-ncol(xTrain)] = (kNNTrain[,-ncol(xTrain)])^deg
+kNNTest[,] = kNNTest^deg
+classify.knn <- kknn(formula = formula, 
+                 train = kNNTrain, test = kNNTest, k = 10, distance = 2,
+                 scale = F)
+classify.knn$prob[classify.knn$prob<EPS] = EPS
+MultiLogLoss(test_target_IndMat,classify.knn$prob)
+
+```
+
+#Removing Unimportant Features
+
+```{r}
+varImpPlot(rfFit)
+
+```
+
+```{r}
+set.seed(118) 
+result <- rfcv(xTrain[,-ncol(xTrain)], xTrain[,ncol(xTrain)], cv.fold=10,
+               scale= "non.log", step = -10, ntree=NTrees)
+with(result, plot(n.var, error.cv, log="x", type="o", lwd=2))
+```
+
+```{r}
+result$n.var
+result$error.cv
+
+```
+
+```{r}
+(iMin = which.min(result$error.cv))
+
+```
+
+```{r}
+if (iMin>=1) {
+  print(iMin)
+  bestNVar = result$n.var[iMin]
+  ii <- order(rfFit$importance[,'MeanDecreaseGini'])
+  reducedTrain = kNNTrain[,c(tail(ii,bestNVar),ncol(kNNTrain))]
+  reducedTest = kNNTest[,tail(ii,bestNVar)]
+  reducedFit <- randomForest(formula, data=reducedTrain, importance=TRUE, 
+                             ntree=NTrees)
+  MultiLogLoss(test_target_IndMat,predict(reducedFit, reducedTest, type="prob"))
+}
+```
+#Creating Meta-Features
+```{r}
+set.seed(919)
+newFeat = data.frame(f1=rowSums(kNNTrain==0),
+                     f2=rowSums(kNNTrain==1))
+newFeatTest = data.frame(f1=rowSums(kNNTest==0),
+                         f2=rowSums(kNNTest==1))
+rfFit <- randomForest(formula, data=cbind(newFeat,kNNTrain), 
+                      importance=TRUE, ntree=NTrees)
+varImpPlot(rfFit)
+```
+
+```{r}
+rfProb <- predict(rfFit, cbind(newFeatTest,kNNTest), type="prob")
+MultiLogLoss(test_target_IndMat,rfProb)
+```
+
